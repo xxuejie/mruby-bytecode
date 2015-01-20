@@ -1,4 +1,9 @@
 module Bytecode
+  class Bytecode
+    attr_accessor :header
+    attr_accessor :sections
+  end
+
   class BinaryHeader
     attr_accessor :binary_identify, :binary_version
     attr_accessor :binary_crc, :binary_size
@@ -259,16 +264,17 @@ module Bytecode
     end
 
     def self.parse(bytes)
-      header, cur = parse_binary_header(bytes, 0)
-      sections = []
+      bytecode = Bytecode.new
+      bytecode.header, cur = parse_binary_header(bytes, 0)
+      bytecode.sections = []
       irep_section = nil
       section, cur = parse_section(bytes, cur, irep_section)
       while section
         irep_section = section if section.is_a? SectionIrep
-        sections <<= section
+        bytecode.sections <<= section
         section, cur = parse_section(bytes, cur, irep_section)
       end
-      [header, sections]
+      bytecode
     end
 
     def self.parse_file(filename)
