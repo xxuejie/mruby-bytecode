@@ -10,6 +10,8 @@ module Bytecode
 
     attr_accessor :rite_version
     attr_accessor :record
+
+    attr_accessor :debug_section
   end
 
   class IrepRecord
@@ -19,14 +21,29 @@ module Bytecode
     attr_accessor :pools
     attr_accessor :symbols
     attr_accessor :child_ireps
-  end
 
-  class SectionLineno
-    IDENTIFIER = "LINE"
+    attr_accessor :debug_record
   end
 
   class SectionDebug
     IDENTIFIER = "DBG\0"
+
+    attr_accessor :record
+  end
+
+  class DebugFileRecord
+    attr_accessor :position
+    attr_accessor :filename
+    attr_accessor :entries
+  end
+
+  class DebugIrepRecord
+    attr_accessor :file_records
+    attr_accessor :child_records
+  end
+
+  class SectionLineno
+    IDENTIFIER = "LINE"
   end
 
   class SectionLv
@@ -39,6 +56,7 @@ module Bytecode
     class Error < StandardError; end
     class InvalidBytecodeVersion < Error; end
     class InvalidCrc < Error; end
+    class InvalidFormat < Error; end
 
     CURRENT_BYTECODE_VERSION = "0003"
 
@@ -46,6 +64,15 @@ module Bytecode
     CRC_XOR_PATTERN = (CRC_16_CCITT << 8)
     CRC_CARRY_BIT = 0x01000000
     CHAR_BIT = 8
+
+    DUMP_NULL_SYM_LEN = 0xFFFF
+
+    POOL_TYPE_STRING = 0x0
+    POOL_TYPE_FIXNUM = 0x1
+    POOL_TYPE_FLOAT = 0x2
+
+    DEBUG_LINE_ARRAY = 0x0
+    DEBUG_LINE_FLAT_MAP = 0x1
 
     def self.crc(bytes, crc = 0)
       crcwk = crc << 8;
@@ -81,8 +108,6 @@ module Bytecode
       [header, cur]
     end
 
-    DUMP_NULL_SYM_LEN = 0xFFFF
-
     def self.padding(cur)
       cur + ((- cur) & (4 - 1))
     end
@@ -100,12 +125,23 @@ module Bytecode
       cur += 4
       record.pools = []
       num_pool.times do
-        t = bytes[cur]
+        t = bytes.getbyte(cur)
         cur += 1
         len = bytes[cur, 2].unpack("n")[0]
         cur += 2
-        record.pools << [t, bytes[cur, len]]
+        val = bytes[cur, len]
         cur += len
+        record.pools <<
+          case t
+          when POOL_TYPE_FLOAT
+            val.to_f
+          when POOL_TYPE_FIXNUM
+            val.to_i
+          when POOL_TYPE_STRING
+            val
+          else
+            val
+          end
       end
       num_symbol = bytes[cur, 4].unpack("N")[0]
       cur += 4
@@ -141,7 +177,72 @@ module Bytecode
       [section, cur]
     end
 
-    def self.parse_section(bytes, cur)
+    def self.parse_debug_record(bytes, cur, irep, filenames)
+      record = DebugIrepRecord.new
+      # Skip record size
+      cur += 4
+      file_count = bytes[cur, 2].unpack("n")[0]
+      cur += 2
+      record.file_records = []
+      file_count.times do
+        file_record = DebugFileRecord.new
+        position = bytes[cur, 4].unpack("N")[0]
+        cur += 4
+        file_record.position = position
+        filename_index = bytes[cur, 2].unpack("n")[0]
+        cur += 2
+        filename = filenames[filename_index]
+        file_record.filename = filename
+        line_entry_count = bytes[cur, 4].unpack("N")[0]
+        cur += 4
+        line_type = bytes.getbyte(cur)
+        cur += 1
+        file_record.entries = []
+        if line_type == DEBUG_LINE_ARRAY
+          line_entry_count.times do
+            file_record.entries << bytes[cur, 2].unpack("n")[0]
+            cur += 2
+          end
+        elsif line_type == DEBUG_LINE_FLAT_MAP
+          entries = {}
+          line_entry_count.times do
+            file_record.entries << bytes[cur, 6].unpack("Nn")
+            cur += 6
+          end
+        else
+          raise InvalidFormat
+        end
+        record.file_records << file_record
+      end
+      record.child_records = []
+      irep.child_ireps.each do |child_irep|
+        child_debug_record, cur = parse_debug_record(bytes, cur, child_irep, filenames)
+        record.child_records << child_debug_record
+      end
+      irep.debug_record = record
+      [record, cur]
+    end
+
+    def self.parse_debug_section(bytes, cur, irep_section)
+      section = SectionDebug.new
+      cur += 4
+      size = bytes[cur, 4].unpack('N')[0]
+      cur += 4
+      filename_len = bytes[cur, 2].unpack("n")[0]
+      cur += 2
+      filenames = []
+      filename_len.times do
+        sym_len = bytes[cur, 2].unpack("n")[0]
+        cur += 2
+        filenames << bytes[cur, sym_len]
+        cur += sym_len
+      end
+      section.record, cur = parse_debug_record(bytes, cur, irep_section.record, filenames)
+      irep_section.debug_section = section
+      [section, cur]
+    end
+
+    def self.parse_section(bytes, cur, irep_section)
       id = bytes[cur, 4]
       if id == "END\0"
         [nil, 8]
@@ -149,6 +250,8 @@ module Bytecode
         case id
         when SectionIrep::IDENTIFIER
           parse_irep_section(bytes, cur)
+        when SectionDebug::IDENTIFIER
+          parse_debug_section(bytes, cur, irep_section)
         else
           [id, bytes[cur + 4, 4].unpack("N")[0] + cur]
         end
@@ -158,10 +261,12 @@ module Bytecode
     def self.parse(bytes)
       header, cur = parse_binary_header(bytes, 0)
       sections = []
-      section, cur = parse_section(bytes, cur)
+      irep_section = nil
+      section, cur = parse_section(bytes, cur, irep_section)
       while section
+        irep_section = section if section.is_a? SectionIrep
         sections <<= section
-        section, cur = parse_section(bytes, cur)
+        section, cur = parse_section(bytes, cur, irep_section)
       end
       [header, sections]
     end
