@@ -17,6 +17,7 @@ module Bytecode
     attr_accessor :record
 
     attr_accessor :debug_section
+    attr_accessor :lv_section
   end
 
   class IrepRecord
@@ -28,6 +29,7 @@ module Bytecode
     attr_accessor :child_ireps
 
     attr_accessor :debug_record
+    attr_accessor :lv_record
   end
 
   class Opcode
@@ -103,8 +105,20 @@ module Bytecode
     IDENTIFIER = "LINE"
   end
 
-  class SectionLvar
+  class Local
+    attr_accessor :name
+    attr_accessor :r
+  end
+
+  class LvRecord
+    attr_accessor :locals
+    attr_accessor :child_records
+  end
+
+  class SectionLv
     IDENTIFIER = "LVAR"
+
+    attr_accessor :record
   end
 
   EOF_IDENTIFIER = "END\0"
@@ -130,6 +144,8 @@ module Bytecode
 
     DEBUG_LINE_ARRAY = 0x0
     DEBUG_LINE_FLAT_MAP = 0x1
+
+    LV_NULL_MARK = 0xFFFF
 
     def self.crc(bytes, crc = 0)
       crcwk = crc << 8;
@@ -301,6 +317,50 @@ module Bytecode
       [section, cur]
     end
 
+    def self.parse_lv_record(bytes, cur, irep, tables)
+      record = LvRecord.new
+      record.locals = []
+      (0..(irep.num_local - 2)).each do
+        local = Local.new
+        sym_idx = bytes[cur, 2].unpack("n")[0]
+        cur += 2
+        if sym_idx == LV_NULL_MARK
+          local.name = "(null)"
+        else
+          local.name = tables[sym_idx]
+        end
+        local.r = bytes[cur, 2].unpack("n")[0]
+        cur += 2
+        record.locals << local
+      end
+      record.child_records = []
+      irep.child_ireps.each do |child_irep|
+        child_lv_record, cur = parse_lv_record(bytes, cur, child_irep, tables)
+        record.child_records << child_lv_record
+      end
+      irep.lv_record = record
+      [record, cur]
+    end
+
+    def self.parse_lv_section(bytes, cur, irep_section)
+      section = SectionLv.new
+      cur += 4
+      size = bytes[cur, 4].unpack('N')[0]
+      cur += 4
+      table_len = bytes[cur, 4].unpack("N")[0]
+      cur += 4
+      tables = []
+      table_len.times do
+        sym_len = bytes[cur, 2].unpack("n")[0]
+        cur += 2
+        tables << bytes[cur, sym_len]
+        cur += sym_len
+      end
+      section.record, cur = parse_lv_record(bytes, cur, irep_section.record, tables)
+      irep_section.lv_section = section
+      [section, cur]
+    end
+
     def self.parse_section(bytes, cur, irep_section)
       id = bytes[cur, 4]
       if id == "END\0"
@@ -311,6 +371,8 @@ module Bytecode
           parse_irep_section(bytes, cur)
         when SectionDebug::IDENTIFIER
           parse_debug_section(bytes, cur, irep_section)
+        when SectionLv::IDENTIFIER
+          parse_lv_section(bytes, cur, irep_section)
         else
           [id, bytes[cur + 4, 4].unpack("N")[0] + cur]
         end
