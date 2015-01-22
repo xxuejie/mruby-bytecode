@@ -30,6 +30,58 @@ module Bytecode
     attr_accessor :debug_record
   end
 
+  class Opcode
+    OPCODES = {
+      0 => ["OP_NOP", "", -> (o) { "" } ],
+      1 => ["OP_MOVE", "A B", "R(A) := R(B)", -> (o) { "R(#{o.a}) := R(#{o.b})" } ]
+    }
+
+    attr_accessor :code
+
+    def initialize(code)
+      @code = code
+    end
+
+    def op
+      code & 0x7f
+    end
+
+    def a
+      (code >> 23) & 0x1ff
+    end
+
+    def b
+      (code >> 14) & 0x1ff
+    end
+
+    def c
+      (code >> 7) & 0x7f
+    end
+
+    def bx
+      (code >> 7) & 0xffff
+    end
+
+    MAXARG_BX = 0xffff
+    MAXARG_SBX = MAXARG_BX >> 1
+    # s for "signed"
+    def sbx
+      bx - MAXARG_SBX
+    end
+
+    def ax
+      (code >> 7) & 0x1ffffff
+    end
+
+    def bz
+      (code >> 9) & 0x3fff
+    end
+
+    def cz
+      (code >> 7) & 3
+    end
+  end
+
   class SectionDebug
     IDENTIFIER = "DBG\0"
 
@@ -51,7 +103,7 @@ module Bytecode
     IDENTIFIER = "LINE"
   end
 
-  class SectionLv
+  class SectionLvar
     IDENTIFIER = "LVAR"
   end
 
@@ -124,7 +176,9 @@ module Bytecode
       num_opcode = bytes[cur, 4].unpack("N")[0]
       cur += 4
       cur = padding(cur)
-      record.opcodes = bytes[cur, 4 * num_opcode].unpack("N" * num_opcode)
+      record.opcodes = bytes[cur, 4 * num_opcode]
+                       .unpack("N" * num_opcode)
+                       .map { |opcode| Opcode.new(opcode) }
       cur += 4 * num_opcode
       num_pool = bytes[cur, 4].unpack("N")[0]
       cur += 4
